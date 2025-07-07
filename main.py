@@ -11,35 +11,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
-import os
+"""
+main.py
+Ejecuta el solver para cap_jb = 2 … 18 y guarda un JSON por capacidad.
+"""
+from pathlib import Path
+import json
+from app import logic
 
-# Definir la ruta del directorio de logs 
-log_dir = 'log'
+DATA_DIR   = Path("./data")
+RESULT_DIR = Path("./results")
+RESULT_DIR.mkdir(exist_ok=True)
 
-# Crear las carpetas log si no existe
-os.makedirs(log_dir, exist_ok=True)
+CAP_MIN, CAP_MAX = 2, 18
+LIM_JB_TB = 50.0     # o 1e6 para “sin límite”
 
-# Definir la ruta del directorio de logs 
-log_file = 'log/app.log'
+for cap in range(CAP_MIN, CAP_MAX + 1):
+    cfg = logic.Settings(cap_jb=cap, l_jb_tb=LIM_JB_TB)
+    res = logic.solve(DATA_DIR, cfg)
 
-# Configurar el sistema de logging
-logging.basicConfig(
-    level=logging.INFO,  # Nivel de severidad (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",  # Formato del mensaje
-    handlers=[
-        logging.StreamHandler(),  # Mostrar en la terminal
-        logging.FileHandler(log_file, mode="a", encoding="utf-8-sig")  # Registrar en un archivo
-    ]
-)
+    safe = {
+        "cap_jb": cap,
+        "cost_m": res["cost"],
+        "tablero": res["tablero"],
+        "junction_boxes": {
+            jb: [i for (i, jj), xv in res["vars"]["x"].items()
+                 if jj == jb and xv.value()]
+            for jb, v in res["vars"]["y"].items() if v.value()
+        },
+        "directos": [i for i, dv in res["vars"]["d"].items() if dv.value()]
+    }
+    with open(RESULT_DIR / f"cap_{cap}.json", "w", encoding="utf-8") as f:
+        json.dump(safe, f, indent=2, ensure_ascii=False)
 
-from app import view
-    
-# Main function
-def main():
-    view.main()
-
-
-# Main function call to run the program
-if __name__ == '__main__':
-    main()
+    print(f"cap {cap:2d} → cable={safe['cost_m']:.2f} m,  "
+          f"JB={len(safe['junction_boxes'])}")

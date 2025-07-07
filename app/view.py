@@ -13,69 +13,53 @@
 # limitations under the License.
 """
 view.py
-CLI para lanzar el optimizador MILP y mostrar el resultado.
-
-Requisitos:
-    pip install click
+CLI directo vía click.  Requiere:  pip install click
 """
-
 import json, click
 from pathlib import Path
-from app import logic
+import logic
 
 
 @click.command()
-@click.option("-d", "--data", default="./data", help="Carpeta con CSV")
-@click.option("--cap-jb", default=6, type=int, show_default=True,
-              help="Capacidad (sensores) por junction-box")
-@click.option("--l-tt-jb", default=3.0, type=float, show_default=True,
-              help="Máx. distancia TT→JB (m)")
-@click.option("--l-jb-tb", default=50.0, type=float, show_default=True,
-              help="Máx. distancia JB→Tablero (m)")
-@click.option("--l-tt-tb", default=12.0, type=float, show_default=True,
-              help="Máx. distancia TT→Tablero para sensores 'directo' (m)")
-@click.option("-v", "--verbose", is_flag=True, help="Muestra trazas del solver")
+@click.option("-d", "--data", default="./data", show_default=True,
+              help="Carpeta con CSV")
+@click.option("--cap-jb", default=6, type=int, show_default=True)
+@click.option("--l-tt-jb", default=3.0, type=float, show_default=True)
+@click.option("--l-jb-tb", default=50.0, type=float, show_default=True)
+@click.option("--l-tt-tb", default=12.0, type=float, show_default=True)
+@click.option("-v", "--verbose", is_flag=True, help="Trazas CBC")
 def main(data, cap_jb, l_tt_jb, l_jb_tb, l_tt_tb, verbose):
     cfg = logic.Settings(
-        cap_jb=cap_jb,
-        l_tt_jb=l_tt_jb,
-        l_jb_tb=l_jb_tb,
-        l_tt_tb=l_tt_tb,
-        solver_msg=verbose,
+        cap_jb=cap_jb, l_tt_jb=l_tt_jb, l_jb_tb=l_jb_tb,
+        l_tt_tb=l_tt_tb, solver_msg=verbose
     )
+    res = logic.solve(Path(data), cfg)
+    x, y, d = res["vars"]["x"], res["vars"]["y"], res["vars"]["d"]
 
-    result = logic.solve(Path(data), cfg)
-    x, y, d = result["vars"]["x"], result["vars"]["y"], result["vars"]["d"]
-
-    # --- Imprime resumen legible -------------------------------------------
-    tb = result["tablero"]
+    tb = res["tablero"]
     click.secho(f"\n►  Tablero elegido: {tb['id']}  @ ({tb['x']:.2f}, {tb['y']:.2f})",
                 fg="yellow")
-    click.echo(f"   Longitud total de cable = {result['cost']:.2f} m\n")
+    click.echo(f"   Longitud total de cable = {res['cost']:.2f} m\n")
 
     click.echo("Junction boxes activadas:")
     for jb_id, var in y.items():
-        if var.value() == 1:
-            sensores = [i for (i, jj), xv in x.items() if jj == jb_id and xv.value() == 1]
+        if var.value():
+            sensores = [i for (i, jj), xv in x.items() if jj == jb_id and xv.value()]
             click.echo(f"  • {jb_id}: {len(sensores)} sensores → {sensores}")
 
-    directos = [i for i, dv in d.items() if dv.value() == 1]
+    directos = [i for i, dv in d.items() if dv.value()]
     click.echo("\nSensores directos al tablero:")
     click.echo(f"   {directos}\n")
 
-    # --- Guarda resumen JSON (seguro) --------------------------------------
     safe = {
-        "cost": result["cost"],
+        "cap_jb": cap_jb,
+        "cost_m": res["cost"],
         "tablero": tb,
-        "settings": vars(result["settings"]),
-        "directos": directos,
         "junction_boxes": {
-            jb_id: [
-                i for (i, jj), xv in x.items()
-                if jj == jb_id and xv.value() == 1
-            ]
-            for jb_id, var in y.items() if var.value() == 1
-        }
+            jb: [i for (i, jj), xv in x.items() if jj == jb and xv.value()]
+            for jb, v in y.items() if v.value()
+        },
+        "directos": directos
     }
     with open("result.json", "w", encoding="utf-8") as f:
         json.dump(safe, f, indent=2, ensure_ascii=False)
