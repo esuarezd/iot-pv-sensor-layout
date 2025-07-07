@@ -208,3 +208,6 @@ __marimo__/
 
 # Edison. Data ignore
 *.csv
+*.DS_Store
+*.json
+
