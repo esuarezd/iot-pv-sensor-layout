@@ -9,9 +9,13 @@ source .venv/bin/activate
 
 Run the milp according to the capacity to evaluate
 python -m app.view -d ./data --cap-jb 1  --l-jb-tb 100 --plot
+
 python -m app.view -d ./data --cap-jb 2  --l-jb-tb 100 --plot
+
 python -m app.view -d ./data --cap-jb 3  --l-jb-tb 100 --plot
+
 python -m app.view -d ./data --cap-jb 4  --l-jb-tb 100 --plot
+
 python -m app.view -d ./data --cap-jb 6  --l-jb-tb 100 --plot
 
 
