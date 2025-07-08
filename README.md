@@ -2,6 +2,7 @@
 Mixed-Integer Linear Programming (MILP) model to place junction boxes and a central panel board for PV module temperature sensors.
 
 Author: Edison Suarez. 
+
 markdown ## License Licensed under the Apache License, Version 2.0. See the LICENSE file for details.
 
 Enable virtual environment
