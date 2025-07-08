@@ -12,37 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-main.py
-Ejecuta el solver para cap_jb = 2 … 18 y guarda un JSON por capacidad.
+sweep_caps.py
+Recorre cap_jb = 2…18, llama logic.solve() y guarda un JSON por capacidad.
 """
 from pathlib import Path
 import json
-from app import logic
+from app import logic   # importar vía package
 
 DATA_DIR   = Path("./data")
 RESULT_DIR = Path("./results")
 RESULT_DIR.mkdir(exist_ok=True)
 
-CAP_MIN, CAP_MAX = 2, 18
-LIM_JB_TB = 50.0     # o 1e6 para “sin límite”
-
-for cap in range(CAP_MIN, CAP_MAX + 1):
-    cfg = logic.Settings(cap_jb=cap, l_jb_tb=LIM_JB_TB)
+for cap in range(1, 19):
+    cfg = logic.Settings(cap_jb=cap, l_jb_tb=50.0)
     res = logic.solve(DATA_DIR, cfg)
 
-    safe = {
+    out = {
         "cap_jb": cap,
         "cost_m": res["cost"],
         "tablero": res["tablero"],
         "junction_boxes": {
-            jb: [i for (i, jj), xv in res["vars"]["x"].items()
-                 if jj == jb and xv.value()]
-            for jb, v in res["vars"]["y"].items() if v.value()
+            jb: {"sensores": [i for (i, jj), xv in res["vars"]["x"].items()
+                              if jj == jb and xv.value()],
+                 "cables": int(res["vars"]["k"][jb].value())}
+            for jb, var in res["vars"]["y"].items() if var.value()
         },
         "directos": [i for i, dv in res["vars"]["d"].items() if dv.value()]
     }
     with open(RESULT_DIR / f"cap_{cap}.json", "w", encoding="utf-8") as f:
-        json.dump(safe, f, indent=2, ensure_ascii=False)
+        json.dump(out, f, indent=2, ensure_ascii=False)
 
-    print(f"cap {cap:2d} → cable={safe['cost_m']:.2f} m,  "
-          f"JB={len(safe['junction_boxes'])}")
+    print(f"cap {cap:2d} → cable={out['cost_m']:.2f} m,  JB={len(out['junction_boxes'])}")

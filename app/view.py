@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-view.py
-CLI directo vía click.  Requiere:  pip install click
+view.py  - Prueba interactiva para UNA capacidad.
+  python app/view.py -d ./data --cap-jb 4 --l-jb-tb 100
+Requiere: pip install click
 """
 import json, click
 from pathlib import Path
@@ -21,31 +22,28 @@ import logic
 
 
 @click.command()
-@click.option("-d", "--data", default="./data", show_default=True,
-              help="Carpeta con CSV")
-@click.option("--cap-jb", default=6, type=int, show_default=True)
+@click.option("-d", "--data", default="./data", show_default=True)
+@click.option("--cap-jb",  default=6,  type=int,   show_default=True)
 @click.option("--l-tt-jb", default=3.0, type=float, show_default=True)
 @click.option("--l-jb-tb", default=50.0, type=float, show_default=True)
 @click.option("--l-tt-tb", default=12.0, type=float, show_default=True)
-@click.option("-v", "--verbose", is_flag=True, help="Trazas CBC")
+@click.option("-v", "--verbose", is_flag=True)
 def main(data, cap_jb, l_tt_jb, l_jb_tb, l_tt_tb, verbose):
-    cfg = logic.Settings(
-        cap_jb=cap_jb, l_tt_jb=l_tt_jb, l_jb_tb=l_jb_tb,
-        l_tt_tb=l_tt_tb, solver_msg=verbose
-    )
+    cfg = logic.Settings(cap_jb=cap_jb, l_tt_jb=l_tt_jb,
+                         l_jb_tb=l_jb_tb, l_tt_tb=l_tt_tb,
+                         solver_msg=verbose)
     res = logic.solve(Path(data), cfg)
-    x, y, d = res["vars"]["x"], res["vars"]["y"], res["vars"]["d"]
+    x, y, d, k = (res["vars"][v] for v in ("x", "y", "d", "k"))
 
     tb = res["tablero"]
-    click.secho(f"\n►  Tablero elegido: {tb['id']}  @ ({tb['x']:.2f}, {tb['y']:.2f})",
-                fg="yellow")
+    click.secho(f"\n►  Tablero elegido: {tb['id']}  @ ({tb['x']:.2f}, {tb['y']:.2f})", fg="yellow")
     click.echo(f"   Longitud total de cable = {res['cost']:.2f} m\n")
 
     click.echo("Junction boxes activadas:")
-    for jb_id, var in y.items():
+    for jb, var in y.items():
         if var.value():
-            sensores = [i for (i, jj), xv in x.items() if jj == jb_id and xv.value()]
-            click.echo(f"  • {jb_id}: {len(sensores)} sensores → {sensores}")
+            sensores = [i for (i, jj), xv in x.items() if jj == jb and xv.value()]
+            click.echo(f"  • {jb}: {len(sensores)} sensores, {int(k[jb].value())} cable(s) → {sensores}")
 
     directos = [i for i, dv in d.items() if dv.value()]
     click.echo("\nSensores directos al tablero:")
@@ -56,8 +54,9 @@ def main(data, cap_jb, l_tt_jb, l_jb_tb, l_tt_tb, verbose):
         "cost_m": res["cost"],
         "tablero": tb,
         "junction_boxes": {
-            jb: [i for (i, jj), xv in x.items() if jj == jb and xv.value()]
-            for jb, v in y.items() if v.value()
+            jb: {"sensores": [i for (i, jj), xv in x.items() if jj == jb and xv.value()],
+                 "cables": int(k[jb].value())}
+            for jb, var in y.items() if var.value()
         },
         "directos": directos
     }
