@@ -29,6 +29,8 @@ import pulp as pl
 
 
 # ───────────────────────── Configuración ───────────────────────────────
+ALPHA = 2.0   # “precio por tapa”:   metros equivalentes por JB activada
+BETA  = 1.0   # “precio por cable”:  metros equivalentes por cada multipar PUR
 @dataclass
 class Settings:
     cap_jb: int = 6          # sensores máx. por JB
@@ -110,11 +112,15 @@ def _build_model(sens, cajas, tb, s):
         m += 4 * k[j] - s_j[j] >= 2 * y[j]   # solo obliga si la caja está activa
         m += k[j] <= M * y[j]                # k = 0 cuando y = 0
 
-    # 5) Objetivo
+    # 5) Función objetivo  (metros de cable comprados + penalizaciones)
+
     m += (
-        pl.lpSum(d_tt_jb[idx] * x[idx] for idx in x) +      # TT→JB  (no cuesta si superpuestos)
-        pl.lpSum(d_jb_tb[j]   * k[j]  for j in k) +         # JB→TB  por cada cable
-        pl.lpSum(d_tt_tb[i]   * d[i]  for i in d)           # directos
+        pl.lpSum(d_tt_jb[idx] * x[idx] for idx in x) +      # TT → JB
+        pl.lpSum(d_jb_tb[j]   * k[j]  for j in k) +         # JB → TB (× cables)
+        pl.lpSum(d_tt_tb[i]   * d[i]  for i in d) +         # directos
+        ALPHA * pl.lpSum(y[j] for j in y) +                 # costo fijo por JB
+        BETA  * pl.lpSum(k[j] for j in k)                   # costo por cable
     )
+
 
     return m, {"x": x, "y": y, "d": d, "k": k}
