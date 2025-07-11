@@ -27,7 +27,7 @@ for jf in RES_DIR.glob("cap_*.json"):
     with open(jf, encoding="utf-8") as f:
         d = json.load(f)
     rows.append({"cap_jb": d["cap_jb"],
-                 "cable_m": d["cost_m"],
+                 "cable_m": d["total_m"],
                  "jb_activas": len(d["junction_boxes"]),
                  "directos": len(d["directos"])})
 df = pd.DataFrame(rows).set_index("cap_jb").sort_index()

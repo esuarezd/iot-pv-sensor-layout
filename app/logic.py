@@ -62,6 +62,7 @@ def solve(data_dir: str | Path, cfg: Settings = Settings()) -> dict:
             best = {"cost":      pl.value(m.objective),
                     "tablero":   tb.to_dict(),
                     "vars":      var,
+                    "total_m":   None,
                     "settings":  cfg}
     return best
 
@@ -123,4 +124,7 @@ def _build_model(sens, cajas, tb, s):
     )
 
 
-    return m, {"x": x, "y": y, "d": d, "k": k}
+    return m, {
+        "x": x, "y": y, "d": d, "k": k,
+        "len": {"jb_tb": d_jb_tb}
+    }
