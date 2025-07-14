@@ -21,24 +21,23 @@ Requiere: pip install matplotlib pandas
 from pathlib import Path
 import json, pandas as pd, matplotlib.pyplot as plt
 
-RES_DIR = Path("./results")
+RES = Path("./results")
 rows = []
-for jf in RES_DIR.glob("cap_*.json"):
-    with open(jf, encoding="utf-8") as f:
+for jf in RES.glob("cap_*.json"):
+    with open(jf) as f:
         d = json.load(f)
-    rows.append({"cap_jb": d["cap_jb"],
-                 "cable_m": d["total_m"],
-                 "jb_activas": len(d["junction_boxes"]),
+    rows.append({"cap": d["cap_jb"],
+                 "multi": d["multipar_m"],
+                 "jb": len(d["junction_boxes"]),
                  "directos": len(d["directos"])})
-df = pd.DataFrame(rows).set_index("cap_jb").sort_index()
-print("\nTabla resumen (m de cable):\n")
-print(df)
+df = pd.DataFrame(rows).set_index("cap").sort_index()
+print("\nTabla resumen multipar [m]:\n"); print(df)
 
-plt.plot(df.index, df.cable_m, marker="o")
-plt.grid(True)
-plt.xlabel("Capacidad (sensores por JB)")
-plt.ylabel("Cable total [m]")
-plt.title("Cable total vs capacidad")
+plt.plot(df.index, df.multi, marker="o")
+plt.grid(True); plt.xlabel("Capacidad (sensores/JB)")
+plt.ylabel("Multipar [m]")
+plt.title("Metros de multipar vs capacidad")
 plt.tight_layout()
-plt.savefig(RES_DIR / "comparison.png", dpi=150)
+RES.mkdir(exist_ok=True)
+plt.savefig(RES / "comparison.png", dpi=150)
 plt.show()

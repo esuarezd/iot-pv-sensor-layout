@@ -1,139 +1,213 @@
-# Copyright 2025 Edison Suárez Ducón
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# app/view.py
 """
-view.py - Ejecuta una única capacidad:
-  python app/view.py -d ./data --cap-jb 4
-Si data/cajas_<cap>.csv no existe, lo construye con cluster.build_cajas().
+Vista CLI - flujo sin MILP
+· build_cajas ➜ cajas_<cap>.csv + sensores_jb_<cap>.csv
+· multipar    ➜ metros JB→TB + tablero óptimo
 """
 
+from __future__ import annotations
 import json, click
 from pathlib import Path
-from shutil import copyfile
-from app import logic, cluster
-
+import pandas as pd
 import matplotlib.pyplot as plt
+import math
+from app import cluster, logic
 
-@click.command()
-@click.option("-d", "--data", default="./data", show_default=True)
-@click.option("--cap-jb",  default=6, type=int,   show_default=True)
-@click.option("--l-tt-jb", default=3.0, type=float, show_default=True)
-@click.option("--l-jb-tb", default=50.0, type=float, show_default=True)
-@click.option("--l-tt-tb", default=12.0, type=float, show_default=True)
-@click.option("--plot/--no-plot", default=False, show_default=True)
-@click.option("-v", "--verbose", is_flag=True)
-def main(data, cap_jb, l_tt_jb, l_jb_tb, l_tt_tb, plot, verbose):
-    data_path = Path(data)
+DATA_SENSORES_CSV = "sensores.csv"
+DATA_PANELES_CSV = "paneles.csv"
 
-    # 1) construir o reutilizar cajas_<cap>.csv
-    cajas_csv = cluster.build_cajas(data_path, cap_jb, radius=l_tt_jb)
-    copyfile(cajas_csv, data_path / "cajas.csv")
-    click.echo(f"Usando {cajas_csv.name}")
+# ──────────────────────────── Capa de orquestación ─────────────────────────
+def run(data_dir: Path, cap: int, radius: float, do_plot: bool, metric: str):
+    
+    cajas_csv, memb_csv = cluster.build_cajas(data_dir, cap, radius=radius, metric=metric)
+    res   = logic.multipar(data_dir, cajas_csv, metric)
 
-    # 2) resolver MILP
-    cfg = logic.Settings(cap_jb=cap_jb, l_tt_jb=l_tt_jb,
-                         l_jb_tb=l_jb_tb, l_tt_tb=l_tt_tb,
-                         solver_msg=verbose)
-    res = logic.solve(data_path, cfg)
+    sens   = (pd.read_csv(data_dir / DATA_SENSORES_CSV)
+              if (data_dir / DATA_SENSORES_CSV).exists() else None)
+    cajas  = pd.read_csv(cajas_csv)
+    memb   = pd.read_csv(memb_csv)
+    tb     = res["tablero"]
+    panels = (pd.read_csv(data_dir / DATA_PANELES_CSV)
+              if (data_dir / DATA_PANELES_CSV).exists() else None)
+    
+    sens["dist_tb"] = ((sens.x - tb["x"])**2 + (sens.y - tb["y"])**2).pow(0.5)
+    bad_direct = sens[
+        (sens.id.isin(memb.loc[memb.jb_id.isna() | (memb.jb_id==""), "sensor_id"]))
+        & (sens.l_tt_cable_m < sens.dist_tb)        # cable insuficiente
+    ]
 
-    if "vars" not in res:
-        click.secho(f"\n✖  No existe solución factible con cap_jb = {cap_jb}", fg="red")
-        return
+    if not bad_direct.empty:
+        next_idx = len(cajas) + 1
+        for _, s in bad_direct.iterrows():
+            jb_id = f"JB{next_idx:02d}"
+            # añadir JB individual
+            cajas = pd.concat(
+                [cajas,
+                pd.DataFrame([{"id": jb_id, "x": s.x, "y": s.y, "n": 1}])],
+                ignore_index=True
+                )
 
-    # 3) desempaquetar
-    x, y, d, k = (res["vars"][v] for v in ("x", "y", "d", "k"))
-    len_jb_tb  = res["vars"]["len"]["jb_tb"]
-    tb = res["tablero"]
+            memb  = pd.concat(
+                [memb,
+                pd.DataFrame([{"sensor_id": s.id, "jb_id": jb_id}])],
+                ignore_index=True
+                )
+            
+            # sumar su cable a las listas de metros
+            d = s.dist_tb
+            res["dists"].append(float(d))
+            res["cables"].append(1)
+            res["metros"] += d
+            next_idx += 1
 
-    # ── impresión básica ─────────────────────────────────────────────
-    click.secho(f"\n►  Tablero elegido: {tb['id']}  @ ({tb['x']:.2f}, {tb['y']:.2f})", fg="yellow")
-    click.echo(f"   Longitud total de cable = {res['cost']:.2f} m\n")
+        # ordenar: NaN/"" primero, JBxx después
+        memb = memb.sort_values("jb_id", na_position="first")
+
+        # eliminar la fila duplicada de cada sensor y quedarte con la “buena”
+        memb = memb.drop_duplicates(subset="sensor_id", keep="last")
+
+        # reindexar de 0…N-1 para dejar el DataFrame limpio
+        memb = memb.reset_index(drop=True)
+        
+        # actualizar lista de directos (quitar los bad)
+        direct_ok = memb.loc[memb.jb_id.isna() | (memb.jb_id==""), "sensor_id"]
+    else:
+        direct_ok = memb.loc[memb.jb_id.isna() | (memb.jb_id==""), "sensor_id"]
+
+    _print_report(tb, cajas, memb, res, list(direct_ok))
+    _save_json(cap, tb, cajas, memb, res, list(direct_ok))
+    if do_plot:
+        _draw_layout(cap, sens, cajas, memb, tb, panels, res["metros"], metric)
+
+# ──────────────────────────── 1. Consola ───────────────────────────────────
+def _print_report(tb, cajas, memb, res, directos):
+    click.secho(f"\n►  Tablero elegido: {tb['id']}  "
+                f"@ ({tb['x']:.2f},{tb['y']:.2f})", fg="yellow")
+    click.echo(f"   Multipar total = {res['metros']:.2f} m\n")
 
     click.echo("Junction boxes activadas:")
-    for jb, var in y.items():
-        if var.value():
-            sensores = [i for (i, jj), xv in x.items() if jj == jb and xv.value()]
-            click.echo(f"  • {jb}: {len(sensores)} sensores, {int(k[jb].value())} cable(s) → {sensores}")
+    for i, row in cajas.iterrows():
+        sensores = memb.loc[memb.jb_id == row.id, "sensor_id"].tolist()
+        click.echo(f"  • {row.id}: {len(sensores)} sens, "
+                   f"{res['cables'][i]} cables → {sensores}")
 
-    directos = [i for i, dv in d.items() if dv.value()]
     click.echo("\nSensores directos al tablero:")
-    click.echo(f"   {directos}")
+    click.echo(f"   {directos or '—'}\n")
 
-    # ── lista de cortes JB→Tablero ───────────────────────────────────
-    click.echo("\nLista de cortes (multipar):")
-    total_m = 0.0
-    for jb, var in y.items():
-        if var.value():
-            L = len_jb_tb[jb]
-            nc = int(k[jb].value())
-            tramo = L * nc
-            total_m += tramo
-            click.echo(f"  • {jb}: {nc} × {L:.2f} m  =  {tramo:.2f} m")
-    res["total_m"] = total_m
-    click.echo(f"  Total multipar: {total_m:.2f} m\n")
+    click.echo("Lista de cortes (JB → TB):")
+    total = 0
+    for i, row in cajas.iterrows():
+        L, nc = res["dists"][i], res["cables"][i]
+        tramo = L*nc; total += tramo
+        click.echo(f"  • {row.id}: {nc} × {L:.2f} m  =  {tramo:.2f} m")
+    click.echo(f"  Total multipar = {total:.2f} m\n")
 
-    # ── guardar JSON ────────────────────────────────────────────────
+# ──────────────────────────── 3. JSON ─────────────────────────────────────
+def _save_json(cap, tb, cajas, memb, res, directos):
     Path("results").mkdir(exist_ok=True)
-    safe = {
-        "cap_jb": cap_jb,
-        "cost_m": res["cost"],
+    out = {
+        "cap_jb": cap,
+        "multipar_m": res["metros"],
         "tablero": tb,
-        "total_m": total_m,
+        "directos": directos,
         "junction_boxes": {
-            jb: {"sensores": [i for (i, jj), xv in x.items() if jj == jb and xv.value()],
-                 "cables": int(k[jb].value()),
-                 "metros": len_jb_tb[jb] * int(k[jb].value())}
-            for jb, var in y.items() if var.value()
-        },
-        "directos": directos
+            row.id: {
+                "sensores": memb.loc[memb.jb_id == row.id,
+                                     "sensor_id"].tolist(),
+                "cables":   int(res["cables"][i]),
+                "metros":   float(res["dists"][i]*res["cables"][i])
+            }
+            for i, row in cajas.iterrows()
+        }
     }
-    with open(f"results/cap_{cap_jb}.json", "w", encoding="utf-8") as f:
-        json.dump(safe, f, indent=2, ensure_ascii=False)
+    with open(f"results/cap_{cap}.json", "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
 
-    # ── gráfico opcional ────────────────────────────────────────────
-    if plot:
-        draw_layout(res, cajas_csv)
-
-def draw_layout(res, cajas_csv):
-    import pandas as pd
-    sens = pd.read_csv("data/sensores.csv")
-    cajas = pd.read_csv(cajas_csv)
-    tb = res["tablero"]
-    x, y, d, k = (res["vars"][v] for v in ("x", "y", "d", "k"))
-
+# ──────────────────────────── 4. Figura ───────────────────────────────────
+def _draw_layout(cap, sens, cajas, memb, tb, panels, metros, metric):
+    
     fig, ax = plt.subplots()
-    ax.scatter(sens.x, sens.y, c="tab:blue", marker="o", label="Sensores")
-    act = cajas[cajas.id.isin([j for j,v in y.items() if v.value()])]
-    ax.scatter(act.x, act.y, c="tab:orange", marker="s", label="JB activas")
-    ax.scatter(tb["x"], tb["y"], c="tab:red", marker="*", s=200, label="Tablero")
+    
+    # paneles FV
+    _plot_panels(ax, panels)
+    # puntos, lineas y etiquetas de sensores, cajas y tableros
+    _plot_items(ax, sens, cajas, memb, tb, metric)
+    # agregar titulos en plot y guardar
+    _plot_finalize(fig, ax, cap, metros)
+    
+# ── 4a paneles ─────────────────────────────────
+def _plot_panels(ax, panels):
+    
+    if panels is not None:
+        for _, p in panels.iterrows():
+            xs = [p.x1, p.x2, p.x3, p.x4, p.x1]
+            ys = [p.y1, p.y2, p.y3, p.y4, p.y1]
+            # dibujar el rectangulo
+            ax.plot(xs, ys, c="lightgray", lw=0.8, zorder=0)
+            # calcular el centroide
+            cx = (p.x1 + p.x2 + p.x3 + p.x4) / 4
+            cy = (p.y1 + p.y2 + p.y3 + p.y4) / 4
+            # plot de la etiqueta
+            ax.text(cx, cy, p.id, fontsize=6, color="dimgray",
+                ha="center", va="center", zorder=0)
 
-    for (i,j), xv in x.items():
-        if xv.value():
-            si = sens.loc[sens.id==i].iloc[0]
-            sj = act.loc[act.id==j].iloc[0]
-            ax.plot([si.x, sj.x], [si.y, sj.y], lw=0.5, c="gray")
+# ── 4b Puntos, líneas y etiquetas ─────────────────────────────────
+def _plot_items(ax, sens, cajas, memb, tb, metric):
+    
+    ax.scatter(sens.x, sens.y, c="tab:blue", s=25, label="Sensores", zorder=3)
+    for _, s in sens.iterrows():
+        ax.text(s.x + 0.12, s.y + 0.12, s.id, fontsize=6, color="blue")
 
-    for jb, var in y.items():
-        if var.value():
-            sj = act.loc[act.id==jb].iloc[0]
-            ax.plot([sj.x, tb["x"]], [sj.y, tb["y"]], lw=1.0, c="black")
+    ax.scatter(cajas.x, cajas.y, c="tab:orange", marker="s",
+               s=40, label="JB", zorder=4)
+    for _, j in cajas.iterrows():
+        ax.text(j.x - 0.15, j.y + 0.12, j.id, fontsize=6,
+                color="darkorange", ha="right")
 
+    ax.scatter(tb["x"], tb["y"], c="tab:red", marker="*",
+               s=180, label="Tablero", zorder=5)
+    ax.text(tb["x"] + 0.12, tb["y"] - 0.3, tb["id"],
+            fontsize=7, color="red", va="top")
+
+    # Sensor → JB (filtra directos)
+    for _, link in memb[memb.jb_id.notna() & (memb.jb_id != "")].iterrows():
+        srow = sens.loc[sens.id == link.sensor_id].iloc[0]
+        jrow = cajas.loc[cajas.id == link.jb_id].iloc[0]
+        ax.plot([srow.x, jrow.x], [srow.y, jrow.y],
+                lw=0.5, c="gray", zorder=1)
+
+    # JB → Tablero
+    for _, row in cajas.iterrows():
+        if metric == "euclid":
+            ax.plot([row.x, tb["x"]], [row.y, tb["y"]],
+                lw=1.0, c="black", zorder=2)
+        else: # manhattan
+            # trazo en “L”: primero horizontal, luego vertical
+            ax.plot([row.x, tb["x"]], [row.y, row.y],
+                    lw=1, c="black", zorder=2)
+            ax.plot([tb["x"], tb["x"]], [row.y, tb["y"]],
+                    lw=1, c="black", zorder=2)
+
+# ── 4c Título, leyenda y guardado ─────────────────────────────────
+def _plot_finalize(fig, ax, cap, metros):
+    
     ax.set_aspect("equal")
-    ax.set_title(f"Layout  –  cap_jb = {res['settings'].cap_jb}\nTotal multipar = {res['total_m']:.2f} m")
-    ax.legend(loc="center left", bbox_to_anchor=(1.03, 0.5))
+    ax.set_title(f"cap={cap}   multipar={metros:.1f} m")
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5))
     plt.tight_layout()
-    plt.savefig(f"results/layout_cap_{res['settings'].cap_jb}.png", dpi=150)
+    plt.savefig(f"results/layout_cap_{cap}.png", dpi=150)
     plt.show()
 
+# ──────────────────────────── CLI wrapper ────────────────────────────────
+@click.command()
+@click.option("-d", "--data", default="./data", show_default=True)
+@click.option("--cap-jb",     default=6,  type=int)
+@click.option("--l-tt-jb",    default=3.0, type=float, show_default=True)
+@click.option("--plot/--no-plot", default=False)
+@click.option("--metric", type=click.Choice(["euclid", "manhattan"]),
+              default="euclid", show_default=True)
+def cli(data, cap_jb, l_tt_jb, plot, metric):
+    run(Path(data), cap_jb, radius=l_tt_jb, do_plot=plot, metric=metric)
+
 if __name__ == "__main__":
-    main()
+    cli()
