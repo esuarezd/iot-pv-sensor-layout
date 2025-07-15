@@ -1,40 +1,32 @@
 # app/view.py
-"""
-Vista CLI - flujo sin MILP
-· build_cajas ➜ cajas_<cap>.csv + sensores_jb_<cap>.csv
-· multipar    ➜ metros JB→TB + tablero óptimo
-"""
-
 from __future__ import annotations
-import json, click
+
+import json, click, math
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+
 from pathlib import Path
-import pandas as pd
-import matplotlib.pyplot as plt
-import math
-from app import cluster, logic
+from app import data_io, cluster, logic
 
-DATA_SENSORES_CSV = "sensores.csv"
-DATA_PANELES_CSV = "paneles.csv"
-
-# ──────────────────────────── Capa de orquestación ─────────────────────────
+# ──────────────────────────── controlador / orquestador ─────────────────────────
 def run(data_dir: Path, cap: int, radius: float, do_plot: bool, metric: str):
     
-    cajas_csv, memb_csv = cluster.build_cajas(data_dir, cap, radius=radius, metric=metric)
-    res   = logic.multipar(data_dir, cajas_csv, metric)
-
-    sens   = (pd.read_csv(data_dir / DATA_SENSORES_CSV)
-              if (data_dir / DATA_SENSORES_CSV).exists() else None)
-    cajas  = pd.read_csv(cajas_csv)
-    memb   = pd.read_csv(memb_csv)
-    tb     = res["tablero"]
-    panels = (pd.read_csv(data_dir / DATA_PANELES_CSV)
-              if (data_dir / DATA_PANELES_CSV).exists() else None)
     
-    sens["dist_tb"] = ((sens.x - tb["x"])**2 + (sens.y - tb["y"])**2).pow(0.5)
-    bad_direct = sens[
-        (sens.id.isin(memb.loc[memb.jb_id.isna() | (memb.jb_id==""), "sensor_id"]))
-        & (sens.l_tt_cable_m < sens.dist_tb)        # cable insuficiente
-    ]
+    sensores= data_io.load_sensores(data_dir)
+    tableros = data_io.load_tableros(data_dir)
+    paneles = data_io.load_paneles(data_dir)
+    
+    cajas  = cluster.build_cajas(sensores, cap, radius, metric)
+    memb   = cluster.build_sensores_por_caja(sensores.copy(), cajas, tableros, metric)
+    
+    # calcula tablero
+    res = logic.multipar(cajas, tableros, metric)
+    # re etiquetar "bad direct"
+    sensores["dist_tb"] = logic._dist(sensores.x, res["tablero"]["x"], sensores.y, res["tablero"]["x"], metric)
+        
+    
+    bad_direct = memb[(memb.jb_id == "") &
+               (sensores.set_index("id").loc[memb.sensor_id, "l_tt_cable_m"]
+                < sensores.set_index("id").loc[memb.sensor_id, "dist_tb"])]
 
     if not bad_direct.empty:
         next_idx = len(cajas) + 1
@@ -69,17 +61,16 @@ def run(data_dir: Path, cap: int, radius: float, do_plot: bool, metric: str):
         # reindexar de 0…N-1 para dejar el DataFrame limpio
         memb = memb.reset_index(drop=True)
         
-        # actualizar lista de directos (quitar los bad)
-        direct_ok = memb.loc[memb.jb_id.isna() | (memb.jb_id==""), "sensor_id"]
-    else:
-        direct_ok = memb.loc[memb.jb_id.isna() | (memb.jb_id==""), "sensor_id"]
-
-    _print_report(tb, cajas, memb, res, list(direct_ok))
-    _save_json(cap, tb, cajas, memb, res, list(direct_ok))
+    # actualizar lista de directos (quitar los bad)
+    direct_ok = memb.loc[memb.jb_id == "", "sensor_id"].tolist()
+    
+    _print_report(res["tablero"], cajas, memb, res, direct_ok)
+    _save_json(cap, res["tablero"], cajas, memb, res, direct_ok)
     if do_plot:
-        _draw_layout(cap, sens, cajas, memb, tb, panels, res["metros"], metric)
+        _draw_layout(cap, sensores, cajas, memb,
+                     res["tablero"], paneles, res["metros"], metric)
 
-# ──────────────────────────── 1. Consola ───────────────────────────────────
+#  1. Consola
 def _print_report(tb, cajas, memb, res, directos):
     click.secho(f"\n►  Tablero elegido: {tb['id']}  "
                 f"@ ({tb['x']:.2f},{tb['y']:.2f})", fg="yellow")
@@ -102,7 +93,7 @@ def _print_report(tb, cajas, memb, res, directos):
         click.echo(f"  • {row.id}: {nc} × {L:.2f} m  =  {tramo:.2f} m")
     click.echo(f"  Total multipar = {total:.2f} m\n")
 
-# ──────────────────────────── 3. JSON ─────────────────────────────────────
+# 2. save json
 def _save_json(cap, tb, cajas, memb, res, directos):
     Path("results").mkdir(exist_ok=True)
     out = {
@@ -124,14 +115,14 @@ def _save_json(cap, tb, cajas, memb, res, directos):
         json.dump(out, f, indent=2, ensure_ascii=False)
 
 # ──────────────────────────── 4. Figura ───────────────────────────────────
-def _draw_layout(cap, sens, cajas, memb, tb, panels, metros, metric):
+def _draw_layout(cap, sensores, cajas, memb, tb, panels, metros, metric):
     
     fig, ax = plt.subplots()
     
     # paneles FV
     _plot_panels(ax, panels)
     # puntos, lineas y etiquetas de sensores, cajas y tableros
-    _plot_items(ax, sens, cajas, memb, tb, metric)
+    _plot_items(ax, sensores, cajas, memb, tb, metric)
     # agregar titulos en plot y guardar
     _plot_finalize(fig, ax, cap, metros)
     
@@ -152,10 +143,10 @@ def _plot_panels(ax, panels):
                 ha="center", va="center", zorder=0)
 
 # ── 4b Puntos, líneas y etiquetas ─────────────────────────────────
-def _plot_items(ax, sens, cajas, memb, tb, metric):
+def _plot_items(ax, sensores, cajas, memb, tb, metric):
     
-    ax.scatter(sens.x, sens.y, c="tab:blue", s=25, label="Sensores", zorder=3)
-    for _, s in sens.iterrows():
+    ax.scatter(sensores.x, sensores.y, c="tab:blue", s=25, label="Sensores", zorder=3)
+    for _, s in sensores.iterrows():
         ax.text(s.x + 0.12, s.y + 0.12, s.id, fontsize=6, color="blue")
 
     ax.scatter(cajas.x, cajas.y, c="tab:orange", marker="s",
@@ -171,7 +162,7 @@ def _plot_items(ax, sens, cajas, memb, tb, metric):
 
     # Sensor → JB (filtra directos)
     for _, link in memb[memb.jb_id.notna() & (memb.jb_id != "")].iterrows():
-        srow = sens.loc[sens.id == link.sensor_id].iloc[0]
+        srow = sensores.loc[sensores.id == link.sensor_id].iloc[0]
         jrow = cajas.loc[cajas.id == link.jb_id].iloc[0]
         ax.plot([srow.x, jrow.x], [srow.y, jrow.y],
                 lw=0.5, c="gray", zorder=1)

@@ -1,4 +1,4 @@
-# Copyright 2025 Edison Suárez Ducón
+# Copyright 2025 Edison Suárez
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,75 +14,69 @@
 
 # app/cluster.py
 import pandas as pd
-import math
-from pathlib import Path
+import math,numpy as np
 
+# helpers ----
 def _dist(ax, ay, bx, by, metric):
+    
     if metric == "euclid":
-        return math.hypot(ax - bx, ay - by)
+        return np.hypot(ax - bx, ay - by)
     else:
         return abs(ax - bx) + abs(ay - by)
 
-def _vecinos(seed, restantes, sens, radius, cap, metric):
-    """Devuelve índices globales dentro del radio, hasta cap–1 vecinos."""
+def _vecinos(seed, restantes, sensores, radius, cap, metric):
+
     vecinos = []
     for idx in restantes:
         if idx == seed:
             continue
         if len(vecinos) >= cap - 1:
             break
-        if _dist(sens.x[seed], sens.y[seed], sens.x[idx], sens.y[idx], metric) <= radius:
+        if _dist(sensores.x[seed], sensores.y[seed], sensores.x[idx], sensores.y[idx], metric) <= radius:
             vecinos.append(idx)
     return vecinos
 
-def build_cajas(data_dir: Path, cap: int, radius: float = 3.0, metric: str = "euclid"):
-    """
-    Genera data/cajas_<cap>.csv  y  data/sensores_jb_<cap>.csv
-    Devuelve las dos rutas.
-    """
-    cajas_csv = data_dir / f"cajas_{cap}.csv"
-    memb_csv  = data_dir / f"sensores_jb_{cap}.csv"
-
-    # siempre regenerar: evita incoherencias si cambian sensores.csv
-    for p in (cajas_csv, memb_csv):
-        p.unlink(missing_ok=True)
-
-    sens = pd.read_csv(data_dir / "sensores.csv")      # id,x,y,l_tt_cable_m
-    tbs  = pd.read_csv(data_dir / "tableros.csv")      # id,x,y
-
-    # --- sensores que llegan directos al tablero --------------------------
-    directos, clust_indices = [], []
-    for idx, s in sens.iterrows():
-        dmin = ((_dist(s.x, s.y, tb.x, tb.y, metric) for _, tb in tbs.iterrows()))
-        if s.l_tt_cable_m >= min(dmin):
-            directos.append(idx)
-        else:
-            clust_indices.append(idx)
-
-    # --- clustering de los restantes -------------------------------------
-    remaining = clust_indices.copy()
+# API publica
+def build_cajas(sens: pd.DataFrame,
+                cap: int,
+                radius: float = 3.0,
+                metric: str = "euclid") -> pd.DataFrame:
+    """Devuelve DF con id,x,y,n de cada JB."""
+    remaining = list(range(len(sens)))
     clusters  = []
     while remaining:
-        seed = remaining[0]
-        cand = _vecinos(seed, remaining, sens, radius, cap, metric)
-        grupo = [seed] + cand
+        seed   = remaining[0]
+        vecinos = _vecinos(seed, remaining, sens, radius, cap, metric)
+        grupo  = [seed] + vecinos
         clusters.append(grupo)
         for idx in grupo:
             remaining.remove(idx)
 
-    # --- construir CSVs ---------------------------------------------------
-    cajas_rows, memb_rows = [], []
+    rows = []
     for k, grp in enumerate(clusters, 1):
         xy = sens.loc[grp, ["x", "y"]].mean()
-        cajas_rows.append({"id": f"JB{k:02d}", "x": xy.x, "y": xy.y, "n": len(grp)})
-        for idx in grp:
-            memb_rows.append({"sensor_id": sens.id[idx], "jb_id": f"JB{k:02d}"})
+        rows.append({"id": f"JB{k:02d}",
+                     "x":  xy.x, "y": xy.y,
+                     "n":  len(grp)})
+    return pd.DataFrame(rows)
 
-    for idx in directos:
-        memb_rows.append({"sensor_id": sens.id[idx], "jb_id": ""})
 
-    pd.DataFrame(cajas_rows).to_csv(cajas_csv, index=False)
-    pd.DataFrame(memb_rows).to_csv(memb_csv,  index=False)
-    print(f"Generadas {len(cajas_rows)} JB en '{cajas_csv.name}' "
-          f"(directos: {len(directos)})")
-    return cajas_csv, memb_csv
+def build_sensores_por_caja(sens: pd.DataFrame,
+                            cajas: pd.DataFrame,
+                            tableros: pd.DataFrame,
+                            metric: str = "euclid") -> pd.DataFrame:
+    """Asignación sensor → JB  ('' si llega directo)."""
+    # distancia sensor ↔ tablero más cercano
+    d_tb = tableros.apply(
+        lambda tb: _dist(sens.x, sens.y, tb.x, tb.y, metric), axis=1)
+    sens["dist_tb"] = d_tb.min(axis=0).values
+
+    memb_rows = []
+    for _, s in sens.iterrows():
+        if s.l_tt_cable_m >= s.dist_tb:          # llega directo
+            memb_rows.append({"sensor_id": s.id, "jb_id": ""})
+        else:                                    # busca la caja más próxima
+            cajas["d"] = _dist(cajas.x, cajas.y, s.x, s.y, metric)
+            jb = cajas.loc[cajas.d.idxmin(), "id"]
+            memb_rows.append({"sensor_id": s.id, "jb_id": jb})
+    return pd.DataFrame(memb_rows)

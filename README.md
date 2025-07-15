@@ -9,15 +9,17 @@ Enable virtual environment
 source .venv/bin/activate
 
 Run the milp according to the capacity to evaluate
-python -m app.view -d ./data --cap-jb 1  --l-jb-tb 100 --plot
+python -m app.view  --cap-jb 1  --plot --metric manhattan
 
-python -m app.view -d ./data --cap-jb 2  --l-jb-tb 100 --plot
+python -m app.view  --cap-jb 2  --plot --metric manhattan
 
-python -m app.view -d ./data --cap-jb 3  --l-jb-tb 100 --plot
+python -m app.view  --cap-jb 3  --plot --metric manhattan
 
-python -m app.view -d ./data --cap-jb 4  --l-jb-tb 100 --plot
+python -m app.view  --cap-jb 4  --plot --metric manhattan
 
-python -m app.view -d ./data --cap-jb 6  --l-jb-tb 100 --plot
+python -m app.view  --cap-jb 5  --plot --metric manhattan
+
+python -m app.view  --cap-jb 6  --plot --metric manhattan
 
 
 Check Comparative curve
