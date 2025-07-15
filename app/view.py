@@ -8,68 +8,33 @@ from pathlib import Path
 from app import data_io, cluster, logic
 
 # ──────────────────────────── controlador / orquestador ─────────────────────────
-def run(data_dir: Path, cap: int, radius: float, do_plot: bool, metric: str):
-    
-    
-    sensores= data_io.load_sensores(data_dir)
-    tableros = data_io.load_tableros(data_dir)
-    paneles = data_io.load_paneles(data_dir)
-    
-    cajas  = cluster.build_cajas(sensores, cap, radius, metric)
-    memb   = cluster.build_sensores_por_caja(sensores.copy(), cajas, tableros, metric)
-    
-    # calcula tablero
-    res = logic.multipar(cajas, tableros, metric)
-    # re etiquetar "bad direct"
-    sensores["dist_tb"] = logic._dist(sensores.x, res["tablero"]["x"], sensores.y, res["tablero"]["x"], metric)
-        
-    
-    bad_direct = memb[(memb.jb_id == "") &
-               (sensores.set_index("id").loc[memb.sensor_id, "l_tt_cable_m"]
-                < sensores.set_index("id").loc[memb.sensor_id, "dist_tb"])]
+def run(data_dir: Path, cap: int, radius: float,
+        do_plot: bool, metric: str):
 
-    if not bad_direct.empty:
-        next_idx = len(cajas) + 1
-        for _, s in bad_direct.iterrows():
-            jb_id = f"JB{next_idx:02d}"
-            # añadir JB individual
-            cajas = pd.concat(
-                [cajas,
-                pd.DataFrame([{"id": jb_id, "x": s.x, "y": s.y, "n": 1}])],
-                ignore_index=True
-                )
+    sens   = data_io.load_sensores(data_dir)
+    panels = data_io.load_paneles(data_dir)
 
-            memb  = pd.concat(
-                [memb,
-                pd.DataFrame([{"sensor_id": s.id, "jb_id": jb_id}])],
-                ignore_index=True
-                )
-            
-            # sumar su cable a las listas de metros
-            d = s.dist_tb
-            res["dists"].append(float(d))
-            res["cables"].append(1)
-            res["metros"] += d
-            next_idx += 1
+    tb     = logic.tablero_centroide(sens)
 
-        # ordenar: NaN/"" primero, JBxx después
-        memb = memb.sort_values("jb_id", na_position="first")
+    # marca “directos”
+    sens["dist_tb"] = logic.dist(sens.x, sens.y, tb["x"], tb["y"], metric)
+    sens["directo"] = sens.l_tt_cable_m > sens.dist_tb
 
-        # eliminar la fila duplicada de cada sensor y quedarte con la “buena”
-        memb = memb.drop_duplicates(subset="sensor_id", keep="last")
+    cajas, memb = cluster.build_cajas(sens, cap, radius, metric)
+    cost, dists, cables = logic.coste_jb(cajas, tb, metric)
+    cost += logic.coste_directo(sens[sens.directo], tb, metric)
 
-        # reindexar de 0…N-1 para dejar el DataFrame limpio
-        memb = memb.reset_index(drop=True)
-        
-    # actualizar lista de directos (quitar los bad)
+    res = {"tablero": tb, "metros": cost,
+           "dists": dists, "cables": cables}
+    
     direct_ok = memb.loc[memb.jb_id == "", "sensor_id"].tolist()
-    
-    _print_report(res["tablero"], cajas, memb, res, direct_ok)
-    _save_json(cap, res["tablero"], cajas, memb, res, direct_ok)
-    if do_plot:
-        _draw_layout(cap, sensores, cajas, memb,
-                     res["tablero"], paneles, res["metros"], metric)
 
+    _print_report(tb, cajas, memb, res, direct_ok)
+    _save_json(cap, tb, cajas, memb, res, direct_ok)
+    if do_plot:
+        _draw_layout(cap, sens, cajas, memb,
+                     tb, panels, cost, metric)
+        
 #  1. Consola
 def _print_report(tb, cajas, memb, res, directos):
     click.secho(f"\n►  Tablero elegido: {tb['id']}  "
@@ -147,12 +112,12 @@ def _plot_items(ax, sensores, cajas, memb, tb, metric):
     
     ax.scatter(sensores.x, sensores.y, c="tab:blue", s=25, label="Sensores", zorder=3)
     for _, s in sensores.iterrows():
-        ax.text(s.x + 0.12, s.y + 0.12, s.id, fontsize=6, color="blue")
+        ax.text(s.x + 0.15, s.y + 0.15, s.id, fontsize=6, color="blue")
 
     ax.scatter(cajas.x, cajas.y, c="tab:orange", marker="s",
                s=40, label="JB", zorder=4)
     for _, j in cajas.iterrows():
-        ax.text(j.x - 0.15, j.y + 0.12, j.id, fontsize=6,
+        ax.text(j.x - 0.15, j.y + 0.15, j.id, fontsize=6,
                 color="darkorange", ha="right")
 
     ax.scatter(tb["x"], tb["y"], c="tab:red", marker="*",
@@ -173,11 +138,11 @@ def _plot_items(ax, sensores, cajas, memb, tb, metric):
             ax.plot([row.x, tb["x"]], [row.y, tb["y"]],
                 lw=1.0, c="black", zorder=2)
         else: # manhattan
-            # trazo en “L”: primero horizontal, luego vertical
-            ax.plot([row.x, tb["x"]], [row.y, row.y],
-                    lw=1, c="black", zorder=2)
-            ax.plot([tb["x"], tb["x"]], [row.y, tb["y"]],
-                    lw=1, c="black", zorder=2)
+            # trazo en “L”: primero vertical, luego horizontal
+            ax.plot([row.x, row.x], [row.y, tb["y"]],
+                lw=1, c="black", zorder=2)
+            ax.plot([row.x, tb["x"]], [tb["y"], tb["y"]],
+                lw=1, c="black", zorder=2)
 
 # ── 4c Título, leyenda y guardado ─────────────────────────────────
 def _plot_finalize(fig, ax, cap, metros):
